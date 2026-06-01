@@ -2,10 +2,11 @@ services:
   - type: web
     name: maze-raycast-api
     runtime: python
-    region: oregon          # change to: frankfurt | singapore | ohio | virginia
-    plan: free              # upgrade to 'starter' for always-on
+    region: oregon          # alternatives: frankfurt | singapore | ohio | virginia
+    plan: free              # upgrade to 'starter' for always-on (no cold starts)
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.0"

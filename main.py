@@ -1,5 +1,5 @@
 """
-main.py – FastAPI service: Doom-style 3-D maze raycaster.
+main.py – FastAPI service: Office Space 3-D maze raycaster.
 
 Endpoints
 ---------
@@ -12,18 +12,20 @@ Grid format
 -----------
 Rows separated by ';', cells by ','.
 
-  W         – stone wall
-  BD/RD/YD  – blue / red / yellow door
+  W         – wall  (beige drywall with chair rail)
+  BD/RD/YD  – blue / red / yellow security door
+  HD        – hidden door (looks identical to a plain wall)
   E         – empty passable floor
   P         – player start (exactly one required)
-  BK/RK/YK  – blue / red / yellow keycard on the floor
+  BK/RK/YK  – blue / red / yellow RFID keycard
+  DOC       – document to collect (A4 paper sheet)
 
 Example curl
 ------------
   curl -X POST https://<host>/render \\
        -H "Content-Type: application/json" \\
        -d '{
-         "grid":   "W,W,W,BD,W,W,W;W,P,W,E,E,E,W;W,E,W,E,E,BK,W;W,E,RD,W,W,E,W;W,E,W,E,E,RK,W;W,E,W,YD,W,E,W;W,E,E,E,E,YK,W;W,W,W,W,W,W,W",
+         "grid":   "W,W,W,BD,W,W,W;W,P,W,E,E,E,W;W,E,W,E,DOC,BK,W;W,E,RD,W,W,E,W;W,E,W,E,E,RK,W;W,E,W,YD,W,E,W;W,E,E,DOC,E,YK,W;W,W,W,W,W,W,W",
          "facing": "right"
        }'
   # Response: { "image": "<base64 string>", "format": "jpeg", "encoding": "base64" }
@@ -51,14 +53,14 @@ log = logging.getLogger("maze_api")
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="Doom-style Maze Raycast API",
+    title="Office Space Maze Raycast API",
     description=(
-        "Render a first-person 3-D maze view in the style of the original "
-        "**DOOM (1993)** using DDA raycasting.\n\n"
-        "Supported grid tokens: `W` wall · `BD`/`RD`/`YD` coloured doors · "
-        "`E` empty · `P` player · `BK`/`RK`/`YK` coloured keycards."
+        "Render a first-person 3-D view of an office maze using DDA raycasting "
+        "with an **Office Space** visual aesthetic.\n\n"
+        "Supported grid tokens: `W` wall · `BD`/`RD`/`YD` security doors · "
+        "`E` empty · `P` player · `BK`/`RK`/`YK` keycards · `DOC` document."
     ),
-    version="3.0.0",
+    version="4.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -68,11 +70,11 @@ app = FastAPI(
 _EXAMPLE_GRID = (
     "W,W,W,BD,W,W,W;"
     "W,P,W,E,E,E,W;"
-    "W,E,W,E,E,BK,W;"
+    "W,E,W,E,DOC,BK,W;"
     "W,E,RD,W,W,E,W;"
     "W,E,W,E,E,RK,W;"
     "W,E,W,YD,W,E,W;"
-    "W,E,E,E,E,YK,W;"
+    "W,E,E,DOC,E,YK,W;"
     "W,W,W,W,W,W,W"
 )
 
@@ -85,15 +87,17 @@ class RenderRequest(BaseModel):
             "Maze grid. Rows separated by **;**, cells by **,**.\n\n"
             "| Token | Meaning |\n"
             "|-------|---------|\n"
-            "| `W`   | Stone wall |\n"
-            "| `BD`  | Blue door |\n"
-            "| `RD`  | Red door |\n"
-            "| `YD`  | Yellow door |\n"
-            "| `E`   | Empty floor |\n"
-            "| `P`   | Player start |\n"
-            "| `BK`  | Blue keycard |\n"
-            "| `RK`  | Red keycard |\n"
-            "| `YK`  | Yellow keycard |\n"
+            "| `W`    | Drywall (beige, chair-rail) |\n"
+            "| `BD`   | Blue security door |\n"
+            "| `RD`   | Red security door |\n"
+            "| `YD`   | Yellow security door |\n"
+            "| `HD`   | Hidden door (visually identical to `W`) |\n"
+            "| `E`    | Empty floor |\n"
+            "| `P`    | Player start |\n"
+            "| `BK`   | Blue RFID keycard |\n"
+            "| `RK`   | Red RFID keycard |\n"
+            "| `YK`   | Yellow RFID keycard |\n"
+            "| `DOC`  | Document (A4 paper sheet) |\n"
         ),
         examples=[_EXAMPLE_GRID],
         min_length=3,
@@ -166,17 +170,19 @@ def render_maze(req: RenderRequest):
 
     **Rendering pipeline**
 
-    1. **Parse** – grid string → solid map (walls/doors) + sprite list (keys).
-    2. **DDA raytrace** – for each screen column, cast a ray to find the nearest
-       wall or door.  Perpendicular (fish-eye-corrected) distance determines
-       wall-strip height.
-    3. **Shading** – stone walls use a staggered brick shader (mortar lines +
-       surface noise).  Coloured doors use a metallic shader with a glowing
-       lock panel.  Distance fog and face darkening (N/S vs E/W) applied
-       throughout.
-    4. **Sprite projection** – keycards projected via camera-plane transform,
-       floor-anchored, and occluded by the per-column depth buffer.
-    5. **JPEG encode** – streamed to client.
+    1. **Parse** – grid string → solid map (walls/doors) + sprite list
+       (keycards + documents).
+    2. **DDA raytrace** – per screen column; perpendicular distance controls
+       wall-strip height (fish-eye corrected).
+    3. **Shading** – drywall uses a chair-rail divider and paint-streak texture.
+       Doors show a wood-veneer lower panel, frosted-glass upper pane, and a
+       coloured RFID badge reader.  Fog colour is bright (fluorescent ambient)
+       so far surfaces wash out to cream, not black.
+    4. **Ceiling** – drop-ceiling tile grid with fluorescent light-bay banding.
+    5. **Floor** – blue-grey corporate carpet with a diagonal weave pattern.
+    6. **Sprite projection** – keycards and document sheets projected via
+       camera-plane transform, floor-anchored, z-buffer occluded.
+    7. **JPEG encode** → base64 → JSON.
     """
     # ── Parse ─────────────────────────────────────────────────────────────────
     try:
@@ -203,12 +209,13 @@ def render_maze(req: RenderRequest):
 
     log.info(
         "Render  grid=%d×%d  player=(%.1f, %.1f)  facing=%s  "
-        "keys=%d  [B=%d R=%d Y=%d]",
+        "items=%d  [BK=%d RK=%d YK=%d DOC=%d]",
         grid_w, grid_h, px, py, req.facing,
         len(items),
         sum(1 for _, _, t in items if t == 10),
         sum(1 for _, _, t in items if t == 11),
         sum(1 for _, _, t in items if t == 12),
+        sum(1 for _, _, t in items if t == 13),
     )
 
     # ── Raytrace ──────────────────────────────────────────────────────────────

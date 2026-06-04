@@ -1,18 +1,24 @@
 """
-raycast.py – DDA raycasting engine: Doom-1993-style aesthetics.
+raycast.py – DDA raycasting engine: Office Space aesthetic.
 
-Grid tokens (semicolon-separated rows, comma-separated cells)
--------------------------------------------------------------
-  W         – stone wall
-  BD/RD/YD  – blue / red / yellow door  (solid; placed at cell mid-plane)
-  E         – empty passable floor
+Visual style
+------------
+  Walls    – smooth beige/cream painted drywall with a chair-rail divider
+  Ceiling  – drop-ceiling tiles (off-white grid) with fluorescent light strips
+  Floor    – corporate blue-grey carpet with a subtle weave pattern
+  Doors    – painted-metal security doors: wood-veneer lower panel, narrow
+             frosted-glass upper pane, and a coloured RFID card-reader badge
+  Keys     – HID-style RFID access cards (blue / red / yellow security level)
+  Docs     – A4 document sheets: white paper, blue letterhead, grey text lines
+
+Grid tokens (semicolon rows, comma cells)
+-----------------------------------------
+  W         – wall
+  BD/RD/YD  – blue / red / yellow security door
+  E         – empty floor
   P         – player start (exactly one required)
-  BK/RK/YK  – blue / red / yellow keycard sprite on the floor
-
-Coordinate system
------------------
-  X right (+col), Y down (+row).
-  angle=0 → east, −π/2 → north ("up").
+  BK/RK/YK  – blue / red / yellow keycard
+  DOC       – document to collect
 """
 
 import math
@@ -22,25 +28,36 @@ from PIL import Image
 
 SCREEN_W  = 500
 SCREEN_H  = 500
-FOV       = math.pi / 3       # 60° horizontal field of view
-_FOG_DIST = 18.0              # distance at which surfaces reach full fog
+FOV       = math.pi / 3        # 60° horizontal field of view
+_FOG_DIST = 20.0               # corridor wash-out distance
 
 # ── Cell-type constants ───────────────────────────────────────────────────────
 
 _EMPTY  = 0
 _WALL   = 1
-_DOOR_B = 2    # blue  door
-_DOOR_R = 3    # red   door
-_DOOR_Y = 4    # yellow door
+_DOOR_B = 2
+_DOOR_R = 3
+_DOOR_Y = 4
+_DOOR_H = 5    # hidden door – solid like a wall, rendered like a wall
 
-_ITEM_B = 10   # blue   key (sprite)
-_ITEM_R = 11   # red    key (sprite)
-_ITEM_Y = 12   # yellow key (sprite)
+_ITEM_B   = 10   # blue  keycard
+_ITEM_R   = 11   # red   keycard
+_ITEM_Y   = 12   # yellow keycard
+_ITEM_DOC = 13   # document
 
-_DOORS = frozenset({_DOOR_B, _DOOR_R, _DOOR_Y})
-_ITEMS = frozenset({_ITEM_B, _ITEM_R, _ITEM_Y})
+_DOORS  = frozenset({_DOOR_B, _DOOR_R, _DOOR_Y})
+_WALLS  = frozenset({_WALL, _DOOR_H})   # cell types that hit at the cell boundary
 
-# ── Player facing ─────────────────────────────────────────────────────────────
+# ── Sprite world-height (controls billboard size on screen) ───────────────────
+
+_ITEM_WORLD_H: dict[int, float] = {
+    _ITEM_B:   0.46,
+    _ITEM_R:   0.46,
+    _ITEM_Y:   0.46,
+    _ITEM_DOC: 0.38,   # documents lie flatter → shorter billboard
+}
+
+# ── Player facing → camera angle ─────────────────────────────────────────────
 
 FACING_ANGLES: dict[str, float] = {
     "up":    -math.pi / 2,
@@ -49,37 +66,50 @@ FACING_ANGLES: dict[str, float] = {
     "right":  0.0,
 }
 
-# ── Doom-style colour palette ─────────────────────────────────────────────────
-# Inspired by the look of DOOM E1 (Knee-Deep in the Dead): warm gray-brown
-# stone, near-black ceilings, dim brown floors.  Doors are dark metal slabs
-# with a glowing colored lock panel.  Keys are brightly colored keycards.
+# ── Office colour palette ─────────────────────────────────────────────────────
+# Fog is LIGHT (bright fluorescent ambient) so far surfaces wash out
+# to cream rather than black – key visual difference from Doom.
 
-# Stone walls
-_C_WALL_EW    = (124,  98,  72)   # east/west face  – lit
-_C_WALL_NS    = ( 86,  68,  50)   # north/south     – shadowed
-# Doors – metallic body
-_C_DOOR_BODY  = ( 80,  80,  80)   # door face (lit)
-_C_DOOR_DARK  = ( 56,  56,  56)   # door face (shadow)
-_C_DOOR_FRAME = ( 22,  22,  22)   # frame / riveted seam
-_C_DOOR_BRASS = (200, 175,  64)   # handle / knob
-# Door lock-panel glow  (base + bright)
-_DOOR_COLORS = {
-    _DOOR_B: ((28,  60, 200), ( 80, 130, 255)),
-    _DOOR_R: ((190,  24,  24), (255,  80,  80)),
-    _DOOR_Y: ((190, 165,  28), (255, 230,  90)),
+_C_FOG        = (224, 219, 210)   # bright corridor ambient (fluorescent haze)
+
+# Drywall – above/below chair rail × lit/shadow face
+_C_WALL_UP_EW = (210, 204, 194)   # upper wall, east/west face
+_C_WALL_UP_NS = (192, 186, 176)   # upper wall, north/south (shadowed)
+_C_WALL_LO_EW = (194, 187, 176)   # lower wall, east/west
+_C_WALL_LO_NS = (177, 171, 161)   # lower wall, north/south
+_C_RAIL       = (152, 144, 132)   # chair-rail / skirting board
+
+# Drop ceiling
+_C_CEIL_TILE  = (214, 214, 208)   # ceiling tile surface
+_C_CEIL_GRID  = (170, 170, 165)   # tile grid lines (suspended rail)
+_C_CEIL_LIGHT = (248, 248, 244)   # fluorescent tube strip
+_C_CEIL_HOR   = (228, 226, 218)   # ceiling near horizon
+
+# Carpet floor
+_C_FLOOR_HOR  = ( 76,  82,  96)   # carpet near horizon (dark perspective)
+_C_FLOOR_BOT  = (104, 112, 128)   # carpet near player
+
+# Office door components
+_C_DOOR_METAL = (172, 166, 156)   # painted-metal door face (lit)
+_C_DOOR_DARK  = (150, 144, 136)   # painted-metal door face (shadow)
+_C_DOOR_FRAME = ( 82,  78,  72)   # frame / edge seal
+_C_DOOR_WOOD  = (138,  98,  56)   # wood-veneer panel
+_C_DOOR_WOOD_D= (115,  82,  47)   # wood-veneer shadow
+_C_DOOR_GLASS = (186, 210, 218)   # frosted glass pane
+
+# RFID badge reader glow  →  (base LED colour, bright LED colour)
+_DOOR_BADGE: dict[int, tuple] = {
+    _DOOR_B: ((22,  55, 185), ( 70, 130, 255)),
+    _DOOR_R: ((185,  22,  22), (255,  75,  75)),
+    _DOOR_Y: ((185, 158,  18), (255, 218,  55)),
 }
-# Key sprite colours
-_KEY_COLORS = {
-    _ITEM_B: ( 32,  88, 228),
-    _ITEM_R: (228,  32,  32),
-    _ITEM_Y: (228, 204,  32),
+
+# Keycard accent colours per security level
+_KEY_ACCENT: dict[int, tuple] = {
+    _ITEM_B: ( 30,  85, 225),
+    _ITEM_R: (225,  30,  30),
+    _ITEM_Y: (225, 200,  30),
 }
-# Atmosphere
-_C_FOG        = (  6,   4,   3)
-_C_CEIL_TOP   = ( 10,   8,   6)
-_C_CEIL_HOR   = ( 46,  36,  26)
-_C_FLOOR_HOR  = ( 40,  32,  20)
-_C_FLOOR_BOT  = ( 68,  52,  36)
 
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
@@ -93,213 +123,369 @@ def _lerp(a: tuple, b: tuple, t: float) -> tuple:
     )
 
 
-def _clamp_rgb(r: float, g: float, b: float) -> tuple:
+def _clamp(r: float, g: float, b: float) -> tuple:
     return (max(0, min(255, int(r))),
             max(0, min(255, int(g))),
             max(0, min(255, int(b))))
 
 
-def _fog(t: float) -> float:
-    """Doom used a power-curve falloff – more dramatic than linear."""
-    return min(1.0, (t / _FOG_DIST) ** 0.85)
+def _fog(perp: float) -> float:
+    """Gentle office corridor wash-out (power > 1 = stays clear up close)."""
+    return min(1.0, (perp / _FOG_DIST) ** 1.15)
 
 
-# ── Stone-wall texture simulation ─────────────────────────────────────────────
+# ── Wall pixel – painted drywall with chair rail ──────────────────────────────
 
-def _stone_shade(wx: float, wy: float) -> float:
-    """
-    Staggered brick / mortar shade factor.
-    Returns a multiplier ≈ [0.65 … 1.07] to apply to the base colour.
-
-    wx, wy ∈ [0, 1]: fractional hit coordinates within the wall cell.
-    """
-    row_idx = int(wy * 6)
-    # Alternate brick columns every other row (stagger)
-    fx = (wx * 7.0 + (0.5 if row_idx & 1 else 0.0)) % 1.0
-    fy = (wy * 6.0) % 1.0
-
-    # Mortar darkening at fx ≈ 0 (vertical joint) and fy ≈ 0 (horizontal joint)
-    mx = max(0.0, 1.0 - fx / 0.05) if fx < 0.05 else 0.0
-    my = max(0.0, 1.0 - fy / 0.04) if fy < 0.04 else 0.0
-    mortar = max(mx, my)
-
-    # Subtle surface noise (sinusoidal, deterministic)
-    noise = math.sin(wx * 83.7) * math.sin(wy * 57.1) * 0.05
-
-    return (1.0 - mortar * 0.38) * (1.0 + noise)
-
+_RAIL_Y = 0.40    # chair rail sits 40 % down the wall
+_RAIL_W = 0.026   # rail thickness as fraction of wall height
 
 def _wall_pixel(side: int, perp: float, wx: float, wy: float) -> tuple:
-    base  = _C_WALL_EW if side == 0 else _C_WALL_NS
-    shade = _stone_shade(wx, wy)
+    """
+    Office drywall shader.
+    - Above rail : lighter beige
+    - Rail band  : medium-grey skirting / chair-rail moulding
+    - Below rail : slightly warmer/darker beige
+    Subtle vertical paint-roller streaks add micro-texture.
+    """
     fog_t = _fog(perp)
-    r, g, b = base[0] * shade, base[1] * shade, base[2] * shade
-    return _lerp(_clamp_rgb(r, g, b), _C_FOG, fog_t)
+
+    if abs(wy - _RAIL_Y) < _RAIL_W:
+        return _lerp(_C_RAIL, _C_FOG, fog_t)
+
+    if wy > _RAIL_Y + _RAIL_W:
+        base = _C_WALL_LO_EW if side == 0 else _C_WALL_LO_NS
+    else:
+        base = _C_WALL_UP_EW if side == 0 else _C_WALL_UP_NS
+
+    # Faint vertical roller-brush texture
+    streak = (math.sin(wx * 131.7) * 0.55
+            + math.sin(wx *  44.3) * 0.30
+            + math.sin(wx *  11.1) * 0.15) * 0.016
+    return _lerp(_clamp(base[0]*(1+streak), base[1]*(1+streak), base[2]*(1+streak)),
+                 _C_FOG, fog_t)
 
 
-# ── Door colour ───────────────────────────────────────────────────────────────
+# ── Door pixel – office security door ────────────────────────────────────────
+
+_GLASS_SPLIT = 0.28    # frosted glass occupies top 28 % of door
+_BADGE_X  = (0.74, 0.91)
+_BADGE_Y  = (0.52, 0.74)
 
 def _door_pixel(door_type: int, side: int, perp: float, wx: float, wy: float) -> tuple:
     """
-    Doom-style metal door with a rectangular glowing lock panel.
-
-    Regions (wx=horizontal, wy=vertical, both 0→1):
-      Outer frame        – dark metal seam
-      Horizontal seams   – at 28% and 72% height
-      Central lock panel – 28–72% height, 32–68% width; colour varies by type
-      Door body          – dark metallic panels with subtle horizontal banding
-      Handle/knob        – small brass oval near right of lock panel
+    Office security door:
+      Top 28 %   – frosted-glass vision panel
+      Rail        – painted metal rail at glass/wood boundary
+      Lower 72 % – wood-veneer panel with grain
+      Right side  – RFID card-reader badge with coloured LED glow
     """
     fog_t = _fog(perp)
 
-    # ── Outer frame / seam ────────────────────────────────────────────────
-    if wx < 0.04 or wx > 0.96 or wy < 0.03 or wy > 0.97:
+    # ── Outer frame ───────────────────────────────────────────────────────
+    if wx < 0.035 or wx > 0.965 or wy < 0.018 or wy > 0.982:
         return _lerp(_C_DOOR_FRAME, _C_FOG, fog_t)
 
-    # ── Horizontal panel divider lines ────────────────────────────────────
-    if abs(wy - 0.28) < 0.014 or abs(wy - 0.72) < 0.014:
+    # ── Horizontal rail (glass / wood divider) ───────────────────────────
+    if abs(wy - _GLASS_SPLIT) < 0.018:
         return _lerp(_C_DOOR_FRAME, _C_FOG, fog_t)
 
-    # ── Vertical centre seam ──────────────────────────────────────────────
-    if abs(wx - 0.50) < 0.012 and not (0.28 < wy < 0.72):
-        return _lerp(_C_DOOR_FRAME, _C_FOG, fog_t)
+    # ── RFID badge reader (recessed box on wood panel, right side) ────────
+    bx1, bx2 = _BADGE_X
+    by1, by2 = _BADGE_Y
+    if bx1 < wx < bx2 and by1 < wy < by2:
+        # Recessed housing border
+        inner = 0.025
+        if wx < bx1+inner or wx > bx2-inner or wy < by1+inner or wy > by2-inner:
+            return _lerp((48, 46, 44), _C_FOG, fog_t)
+        # LED glow (radial, centred on reader face)
+        base_led, glow_led = _DOOR_BADGE[door_type]
+        cx = (bx1 + bx2) / 2.0
+        cy = (by1 + by2) / 2.0
+        dx = (wx - cx) / 0.055
+        dy = (wy - cy) / 0.072
+        glow_t = max(0.0, 1.0 - math.sqrt(dx*dx + dy*dy))
+        # Small circular indicator in top-centre of reader
+        ind_x = abs(wx - cx) / 0.025
+        ind_y = abs(wy - (by1 + 0.06)) / 0.025
+        if math.sqrt(ind_x*ind_x + ind_y*ind_y) < 1.0:
+            led = _lerp(base_led, glow_led, 0.9)
+        else:
+            led = _lerp(base_led, glow_led, glow_t * 0.55)
+        # Reader body (dark plastic)
+        reader_body = _lerp((55, 54, 52), led, glow_t * 0.35 + 0.1)
+        return _lerp(reader_body, _C_FOG, fog_t)
 
-    # ── Glowing colour lock panel ─────────────────────────────────────────
-    if 0.28 < wy < 0.72 and 0.32 < wx < 0.68:
-        base_col, glow_col = _DOOR_COLORS[door_type]
-        # Radial glow centred on the panel
-        dx = (wx - 0.50) / 0.18
-        dy = (wy - 0.50) / 0.22
-        glow_t = max(0.0, 1.0 - math.sqrt(dx * dx + dy * dy))
-        panel  = _lerp(base_col, glow_col, glow_t * 0.65)
+    # ── Frosted glass panel ───────────────────────────────────────────────
+    if wy < _GLASS_SPLIT:
+        # Subtle random frost pattern
+        frost = (math.sin(wx * 97.3) * math.cos(wy * 73.1)) * 0.06
+        glass = _clamp(
+            _C_DOOR_GLASS[0] * (1 + frost),
+            _C_DOOR_GLASS[1] * (1 + frost),
+            _C_DOOR_GLASS[2] * (1 + frost),
+        )
+        return _lerp(glass, _C_FOG, fog_t * 0.5)   # glass is less fogged
 
-        # Door handle: small brass accent to the right of centre
-        if 0.54 < wx < 0.62 and 0.45 < wy < 0.55:
-            panel = _C_DOOR_BRASS
-
-        return _lerp(panel, _C_FOG, fog_t)
-
-    # ── Door body: metallic panels with slight horizontal banding ─────────
-    body = _C_DOOR_BODY if side == 0 else _C_DOOR_DARK
-    # Faint panel-line darkening every ⅓ of each panel section
-    panel_y = wy % 0.28
-    band    = max(0.0, 1.0 - panel_y / 0.018) * 0.22 if panel_y < 0.018 else 0.0
-    shade   = 1.0 - band
-    r, g, b = body[0] * shade, body[1] * shade, body[2] * shade
-    return _lerp(_clamp_rgb(r, g, b), _C_FOG, fog_t)
+    # ── Wood-veneer panel ─────────────────────────────────────────────────
+    # Horizontal wood grain lines
+    grain_y  = (wy * 28.0) % 1.0
+    grain    = 1.0 - max(0.0, 0.18 - abs(grain_y - 0.5) * 7.0) * 0.28
+    # Subtle vertical figure / medullary rays
+    ray      = math.sin(wx * 19.3 + wy * 3.7) * 0.04
+    shade    = grain * (1.0 + ray)
+    wood     = _C_DOOR_WOOD if side == 0 else _C_DOOR_WOOD_D
+    return _lerp(_clamp(wood[0]*shade, wood[1]*shade, wood[2]*shade), _C_FOG, fog_t)
 
 
 # ── Keycard sprite texture ────────────────────────────────────────────────────
 
-def _build_keycard(key_color: tuple, size: int = 72) -> list[list[tuple | None]]:
+def _build_keycard(accent: tuple, size: int = 72) -> list[list[tuple | None]]:
     """
-    Build a Doom-style rectangular keycard texture (size × size).
+    HID-style RFID access card.
 
-    Structure:
-      Top 55%  – bright coloured panel with horizontal circuit-trace lines
-      5%       – dark divider strip
-      Bottom 40% – gray metallic contact area with a CPU chip block
-    Transparent pixels (outside the card outline) are stored as None.
+    Layout
+    ------
+      Top 20 %   – company colour bar with card-level accent stripe
+      Next 55 %  – white card body: left=photo box, right=name lines + logo
+      Bottom 25 % – magnetic stripe + chip contact pads
     """
     tex: list[list[tuple | None]] = [[None] * size for _ in range(size)]
 
-    pad   = max(2, size // 20)
+    pad = max(2, size // 22)
     x1, x2 = pad, size - pad - 1
-    y_top   = pad
-    y_bot   = size - pad - 1
+    y1, y2 = pad, size - pad - 1
+    W = x2 - x1 + 1
 
-    div_y1  = int(size * 0.55)
-    div_y2  = int(size * 0.60)
+    accent_hi = tuple(min(255, int(c * 1.35)) for c in accent)
+    accent_lo = tuple(max(0,   int(c * 0.55)) for c in accent)
 
-    kc_hi = tuple(min(255, int(c * 1.38)) for c in key_color)
-    kc_lo = tuple(max(0,   int(c * 0.55)) for c in key_color)
+    _WHITE  = (248, 247, 244)
+    _LGRAY  = (210, 208, 204)
+    _MGRAY  = (155, 152, 148)
+    _DGRAY  = ( 72,  70,  68)
+    _FRAME  = ( 30,  28,  26)
+    _STRIPE = ( 20,  20,  20)   # magnetic stripe
+    _CHIP   = (195, 170,  80)   # gold chip contacts
 
-    _FRAME = (18, 18, 18)
-    _CHIP  = (88, 88, 88)
+    bar_y2  = y1 + int((y2 - y1) * 0.20)
+    body_y2 = y1 + int((y2 - y1) * 0.75)
+    # Photo box: left 35 % of body
+    photo_x2 = x1 + int(W * 0.38)
 
-    card_w = x2 - x1 + 1
-
-    for y in range(y_top, y_bot + 1):
+    for y in range(y1, y2 + 1):
         for x in range(x1, x2 + 1):
-            fx = (x - x1) / max(1, card_w - 1)   # 0→1 across card width
-            iy = y - y_top
-            top_span = div_y1 - y_top
+            fx = (x - x1) / max(1, W - 1)
+            fy = (y - y1) / max(1, y2 - y1)
 
-            # ── Outer card border ─────────────────────────────────────
-            if x == x1 or x == x2 or y == y_top or y == y_bot:
+            # Card border
+            if x == x1 or x == x2 or y == y1 or y == y2:
                 tex[y][x] = _FRAME
                 continue
 
-            # ── Divider strip ─────────────────────────────────────────
-            if div_y1 <= y <= div_y2:
-                tex[y][x] = _FRAME
+            # ── Colour bar (top 20 %) ─────────────────────────────────
+            if y <= bar_y2:
+                # Gradient from accent_lo to accent along bar
+                t = (y - y1) / max(1, bar_y2 - y1)
+                tex[y][x] = _lerp(accent_hi, accent, t)
+                # Thin white highlight stripe at top
+                if y == y1 + 1:
+                    tex[y][x] = _lerp(_WHITE, accent, 0.5)
                 continue
 
-            # ── Top coloured panel ────────────────────────────────────
-            if y < div_y1:
-                fy = iy / max(1, top_span)
-                # Inner edge shadow
-                if x == x1 + 1 or x == x2 - 1 or y == y_top + 1:
-                    tex[y][x] = kc_lo
-                # Top-left corner shine
-                elif (x - x1) < 5 and iy < 5:
-                    tex[y][x] = kc_hi
-                # Horizontal circuit-trace lines
-                elif abs(fy - 0.32) < 0.04 and 0.14 < fx < 0.86:
-                    tex[y][x] = kc_hi
-                elif abs(fy - 0.62) < 0.04 and 0.14 < fx < 0.55:
-                    tex[y][x] = kc_hi
-                # Small connector dot
-                elif abs(fy - 0.62) < 0.04 and 0.60 < fx < 0.72:
-                    tex[y][x] = kc_hi
+            # ── Magnetic stripe (bottom 25 %) ─────────────────────────
+            if y > body_y2:
+                stripe_t = (y - body_y2) / max(1, y2 - body_y2)
+                # Stripe band across mid section
+                if 0.15 < stripe_t < 0.55:
+                    tex[y][x] = _STRIPE
+                elif 0.60 < stripe_t < 0.85 and 0.15 < fx < 0.55:
+                    # Gold chip contact pads (2×3 grid)
+                    cpx = int(fx * 10) % 2
+                    cpy = int(stripe_t * 20) % 3
+                    if cpx == 0 and cpy < 2:
+                        tex[y][x] = _CHIP
+                    else:
+                        tex[y][x] = _LGRAY
                 else:
-                    tex[y][x] = key_color
+                    tex[y][x] = _LGRAY
+                continue
 
-            # ── Bottom metallic contact panel ─────────────────────────
+            # ── White card body ────────────────────────────────────────
+            if x <= photo_x2:
+                # Photo placeholder box
+                inner = 3
+                if (x == x1 + inner or x == photo_x2 or
+                        y == bar_y2 + inner or y == body_y2 - inner):
+                    tex[y][x] = _MGRAY         # photo frame
+                else:
+                    # Simple silhouette (head + shoulders gradient)
+                    body_fy = (y - bar_y2) / max(1, body_y2 - bar_y2)
+                    photo_fx = (x - x1 - inner) / max(1, photo_x2 - x1 - inner)
+                    if body_fy < 0.40:
+                        # Head circle
+                        hx = photo_fx - 0.5
+                        hy = body_fy - 0.20
+                        if math.hypot(hx * 2, hy * 3.5) < 0.55:
+                            tex[y][x] = _MGRAY
+                        else:
+                            tex[y][x] = _LGRAY
+                    else:
+                        # Shoulders wedge
+                        w_edge = abs(photo_fx - 0.5) * 1.6
+                        if w_edge < body_fy - 0.30:
+                            tex[y][x] = _MGRAY
+                        else:
+                            tex[y][x] = _LGRAY
             else:
-                bot_start = div_y2 + 1
-                bot_span  = y_bot - bot_start
-                fy2 = (y - bot_start) / max(1, bot_span)
+                # Name / info area (right side of card body)
+                info_fy = (y - bar_y2) / max(1, body_y2 - bar_y2)
+                info_fx = (x - photo_x2) / max(1, x2 - photo_x2)
 
-                # CPU chip block in centre
-                if 0.30 < fx < 0.70 and 0.22 < fy2 < 0.70:
-                    # Chip body with subtle grid
-                    on_grid = (
-                        abs((fx * 8) % 1.0 - 0.5) < 0.06 or
-                        abs((fy2 * 5) % 1.0 - 0.5) < 0.06
-                    )
-                    shade = 72 if not on_grid else 55
-                    tex[y][x] = (shade, shade, shade)
+                # 3 name/title text lines in upper half
+                if info_fy < 0.55:
+                    line_t = info_fy * 5.0
+                    frac   = line_t % 1.0
+                    lnum   = int(line_t)
+                    # Line widths: full, medium, short
+                    widths = [0.85, 0.60, 0.45]
+                    lw = widths[min(lnum, 2)]
+                    if frac < 0.48 and info_fx > 0.06 and info_fx < lw:
+                        # First line uses accent colour (name)
+                        tex[y][x] = accent_lo if lnum == 0 else _MGRAY
+                    else:
+                        tex[y][x] = _WHITE
+
+                # Access level badge in lower right
+                elif 0.62 < info_fy < 0.88 and 0.50 < info_fx < 0.92:
+                    # Small coloured badge
+                    bfx = (info_fx - 0.50) / 0.42
+                    bfy = (info_fy - 0.62) / 0.26
+                    if 0.05 < bfx < 0.95 and 0.1 < bfy < 0.9:
+                        border = bfx < 0.10 or bfx > 0.90 or bfy < 0.15 or bfy > 0.85
+                        tex[y][x] = accent_lo if border else accent
+                    else:
+                        tex[y][x] = _WHITE
                 else:
-                    # Gray metal gradient (slightly darker toward bottom)
-                    g_val = int(70 - 18 * fy2)
-                    tex[y][x] = (g_val, g_val, g_val)
+                    tex[y][x] = _WHITE
 
     return tex
 
 
-# Pre-build one texture per key colour at import time
-_KEY_TEX_SIZE = 72
-_KEY_TEXTURES: dict[int, list[list[tuple | None]]] = {
-    _ITEM_B: _build_keycard(_KEY_COLORS[_ITEM_B], _KEY_TEX_SIZE),
-    _ITEM_R: _build_keycard(_KEY_COLORS[_ITEM_R], _KEY_TEX_SIZE),
-    _ITEM_Y: _build_keycard(_KEY_COLORS[_ITEM_Y], _KEY_TEX_SIZE),
+# ── Document sprite texture ───────────────────────────────────────────────────
+
+def _build_doc_texture(size: int = 72) -> list[list[tuple | None]]:
+    """
+    A4 document: white paper with blue letterhead, grey text lines,
+    and a slight dog-ear fold at the top-right corner.
+    """
+    tex: list[list[tuple | None]] = [[None] * size for _ in range(size)]
+
+    pad = max(3, size // 18)
+    x1, x2 = pad, size - pad - 1
+    y1, y2 = pad, size - pad - 1
+    W = x2 - x1 + 1
+    H = y2 - y1 + 1
+
+    _PAPER   = (252, 250, 244)
+    _SHADOW  = (220, 216, 208)   # right/bottom edge shadow
+    _BORDER  = (190, 186, 178)
+    _HEADER  = ( 52,  98, 172)   # corporate blue header
+    _HEAD_HI = ( 80, 130, 210)   # header highlight
+    _LINE    = (158, 152, 143)   # text lines
+    _LINE_S  = (185, 180, 172)   # shorter / lighter lines
+    _FOLD_F  = (230, 226, 218)   # fold flap face
+    _FOLD_S  = (200, 196, 188)   # fold flap shadow
+
+    fold   = max(5, size // 10)  # dog-ear size in pixels
+    head_h = int(H * 0.18)       # header height
+
+    for y in range(y1, y2 + 1):
+        for x in range(x1, x2 + 1):
+            # ── Dog-ear fold (top-right corner) ──────────────────────────
+            local_x = x - (x2 - fold)
+            local_y = y1 + fold - y
+            if local_x > 0 and local_y > 0:
+                if local_x + local_y > fold:
+                    continue   # transparent – corner cut away
+                elif local_x + local_y == fold:
+                    tex[y][x] = _FOLD_S   # fold crease
+                    continue
+                else:
+                    tex[y][x] = _FOLD_F   # underside of folded corner
+                    continue
+
+            fy = (y - y1) / max(1, H - 1)
+            fx = (x - x1) / max(1, W - 1)
+
+            # ── Paper border & shadow ─────────────────────────────────────
+            if x == x1 or y == y1:
+                tex[y][x] = _BORDER
+                continue
+            if x == x2 or y == y2:
+                tex[y][x] = _SHADOW
+                continue
+
+            # ── Blue letterhead ───────────────────────────────────────────
+            if y < y1 + head_h:
+                bar_t = (y - y1) / max(1, head_h)
+                col   = _lerp(_HEAD_HI, _HEADER, bar_t)
+                # Thin white company-name text strip in the middle of header
+                if 0.25 < bar_t < 0.55 and 0.06 < fx < 0.55:
+                    col = _lerp(col, (255, 255, 255), 0.55)
+                # Logo box at right
+                if 0.65 < fx < 0.92 and 0.20 < bar_t < 0.80:
+                    col = _lerp(col, (255, 255, 255), 0.25)
+                tex[y][x] = col
+                continue
+
+            # ── Thin rule below header ────────────────────────────────────
+            if y == y1 + head_h:
+                tex[y][x] = _lerp(_HEADER, _BORDER, 0.5)
+                continue
+
+            # ── Body text lines ───────────────────────────────────────────
+            tex[y][x] = _PAPER
+            body_fy = (y - (y1 + head_h + 1)) / max(1, H - head_h - 2)
+            body_line = body_fy * 9.0     # ~9 lines of text
+            frac      = body_line % 1.0
+
+            # Line rendering: thin band at ~30 % of each line slot
+            if 0.05 < frac < 0.38 and body_line < 8.5:
+                lnum = int(body_line)
+                # Every third line is a paragraph gap (blank)
+                if lnum % 4 != 3:
+                    # Last line of each paragraph is shorter
+                    max_fx = 0.88 if lnum % 4 != 2 else 0.52
+                    min_fx = 0.06
+                    if min_fx < fx < max_fx:
+                        tex[y][x] = _LINE if lnum % 2 == 0 else _LINE_S
+
+    return tex
+
+
+# ── Pre-build all sprite textures ─────────────────────────────────────────────
+
+_TEX_SIZE = 72
+_ITEM_TEXTURES: dict[int, list[list[tuple | None]]] = {
+    _ITEM_B:   _build_keycard(_KEY_ACCENT[_ITEM_B],   _TEX_SIZE),
+    _ITEM_R:   _build_keycard(_KEY_ACCENT[_ITEM_R],   _TEX_SIZE),
+    _ITEM_Y:   _build_keycard(_KEY_ACCENT[_ITEM_Y],   _TEX_SIZE),
+    _ITEM_DOC: _build_doc_texture(_TEX_SIZE),
 }
 
 
 # ── Grid parser ───────────────────────────────────────────────────────────────
 
-_TOKEN_MAP: dict[str, int] = {
+_SOLID_TOKENS: dict[str, int] = {
     "W":  _WALL,
     "BD": _DOOR_B, "RD": _DOOR_R, "YD": _DOOR_Y,
-    # legacy single-char aliases kept for back-compat
-    "D":  _DOOR_B,
+    "HD": _DOOR_H,   # hidden door – looks like a wall
+    "D":  _DOOR_B,   # legacy
 }
-
-_ITEM_TOKEN_MAP: dict[str, int] = {
+_ITEM_TOKENS: dict[str, int] = {
     "BK": _ITEM_B, "RK": _ITEM_R, "YK": _ITEM_Y,
-    # legacy
-    "K":  _ITEM_B,
+    "K":  _ITEM_B,   # legacy
+    "DOC": _ITEM_DOC,
 }
 
 
@@ -310,16 +496,12 @@ def parse_grid(text: str) -> tuple[
     float,
 ]:
     """
-    Parse a maze grid string (rows separated by ';', cells by ',').
+    Parse a semicolon-separated grid string.
 
-    Returns
-    -------
-    solid : list[list[int]]
-        Per-cell solid type (_EMPTY / _WALL / _DOOR_*).
-    items : list[(wx, wy, item_type)]
-        World-space centre and type for every sprite pickup.
-    px, py : float
-        Player starting position (centre of the P cell).
+    Returns (solid, items, px, py).
+    solid – 2-D int array (_EMPTY / _WALL / _DOOR_*)
+    items – list of (world_x, world_y, item_type)
+    px/py – player world position
     """
     solid: list[list[int]] = []
     items: list[tuple[float, float, int]] = []
@@ -327,32 +509,30 @@ def parse_grid(text: str) -> tuple[
     py: float | None = None
 
     for row_idx, line in enumerate(text.strip().split(";")):
-        row_cells = [c.strip().upper() for c in line.strip().split(",") if c.strip()]
-        if not row_cells:
+        tokens = [c.strip().upper() for c in line.strip().split(",") if c.strip()]
+        if not tokens:
             continue
         row: list[int] = []
-        for col_idx, token in enumerate(row_cells):
-            if token in _TOKEN_MAP:
-                row.append(_TOKEN_MAP[token])
-            elif token in _ITEM_TOKEN_MAP:
+        for col_idx, tok in enumerate(tokens):
+            if tok in _SOLID_TOKENS:
+                row.append(_SOLID_TOKENS[tok])
+            elif tok in _ITEM_TOKENS:
                 row.append(_EMPTY)
-                items.append((col_idx + 0.5, row_idx + 0.5, _ITEM_TOKEN_MAP[token]))
-            elif token == "P":
+                items.append((col_idx + 0.5, row_idx + 0.5, _ITEM_TOKENS[tok]))
+            elif tok == "P":
                 row.append(_EMPTY)
                 px = col_idx + 0.5
                 py = row_idx + 0.5
             else:
-                row.append(_EMPTY)   # E or unknown
+                row.append(_EMPTY)
         solid.append(row)
 
     if px is None:
         raise ValueError("Grid contains no player cell 'P'.")
-
     return solid, items, px, py
 
 
 def facing_to_angle(facing: str) -> float:
-    """Translate 'up' / 'down' / 'left' / 'right' to a radian camera angle."""
     key = facing.strip().lower()
     if key not in FACING_ANGLES:
         raise ValueError(
@@ -371,16 +551,8 @@ def _cast_ray(
     camera_angle: float,
 ) -> tuple[float, int, int, float]:
     """
-    Digital Differential Analyzer (DDA) ray cast.
-
-    Returns (perp_dist, side, cell_type, wall_x)
-    -----------------------------------------------
-    perp_dist – fish-eye-corrected perpendicular distance
-    side      – 0 = E/W face  (vertical grid line crossed)
-                1 = N/S face  (horizontal grid line crossed)
-    cell_type – _WALL or one of _DOOR_*
-    wall_x    – fractional hit position along the hit surface [0, 1]
-                (used to look up horizontal texture coordinate)
+    Cast one ray, return (perp_dist, side, cell_type, wall_x).
+    Doors are placed at the midpoint of their cell (classic Wolf3D technique).
     """
     cos_a = math.cos(ray_angle)
     sin_a = math.sin(ray_angle)
@@ -405,13 +577,9 @@ def _cast_ray(
 
     for _ in range(512):
         if sdx < sdy:
-            sdx += ddx
-            mx  += step_x
-            side = 0
+            sdx += ddx; mx += step_x; side = 0
         else:
-            sdy += ddy
-            my  += step_y
-            side = 1
+            sdy += ddy; my += step_y; side = 1
 
         if not (0 <= mx < cols and 0 <= my < rows):
             raw, ct = _FOG_DIST, _WALL
@@ -419,8 +587,7 @@ def _cast_ray(
 
         ct = solid[my][mx]
 
-        if ct == _WALL:
-            # ── Regular solid wall ──────────────────────────────────────
+        if ct in _WALLS:   # _WALL and _DOOR_H both hit at cell boundary
             if side == 0:
                 raw   = (mx - px + (1 - step_x) / 2.0) / cos_a
                 hit_y = py + raw * sin_a
@@ -434,9 +601,6 @@ def _cast_ray(
             break
 
         elif ct in _DOORS:
-            # ── Door: thin plane at cell mid-point ─────────────────────
-            # Project ray to the centre of the door cell and test whether
-            # the intersection still falls inside that cell.
             if side == 0:
                 door_d = (mx + 0.5 - px) / cos_a
                 if door_d > 0:
@@ -455,14 +619,13 @@ def _cast_ray(
                         wx  = x_hit - math.floor(x_hit)
                         if sin_a < 0: wx = 1.0 - wx
                         break
-            # Ray missed the door plane – treat as empty and keep walking
-            ct = _EMPTY
+            ct = _EMPTY   # ray missed door plane – continue
 
     perp = max(0.01, raw * math.cos(ray_angle - camera_angle))
     return perp, side, ct, wx
 
 
-# ── Sprite (key) renderer ────────────────────────────────────────────────────
+# ── Sprite renderer ───────────────────────────────────────────────────────────
 
 def _render_sprites(
     pixels,
@@ -472,66 +635,47 @@ def _render_sprites(
     angle: float,
     W: int, H: int,
 ) -> None:
-    """
-    Project and rasterise key sprite pickups onto the already-rendered frame.
-
-    Uses:
-     • Camera-plane transform for correct perspective projection.
-     • Z-buffer for per-column wall occlusion.
-     • Painter's algorithm (farthest drawn first) for sprite-on-sprite.
-     • Bottom edge anchored to the floor horizon so the key appears to rest
-       on the ground rather than floating.
-    """
+    """Project and rasterise all floor items (keycards + documents)."""
     if not items:
         return
 
-    dir_x  = math.cos(angle)
-    dir_y  = math.sin(angle)
-    half   = math.tan(FOV / 2.0)
-    # Camera plane vector (perpendicular to direction)
-    pl_x   = -dir_y * half
-    pl_y   =  dir_x * half
-    # Determinant of [dir | plane]  (always non-zero for valid FOV)
+    dir_x   = math.cos(angle)
+    dir_y   = math.sin(angle)
+    half    = math.tan(FOV / 2.0)
+    pl_x    = -dir_y * half
+    pl_y    =  dir_x * half
     inv_det = 1.0 / (pl_x * dir_y - dir_x * pl_y)
+    ts      = _TEX_SIZE
 
-    ts = _KEY_TEX_SIZE
-
-    # Painter's algorithm: farthest item first
     for sx, sy, stype in sorted(
-        items,
-        key=lambda s: -(s[0] - px) ** 2 - (s[1] - py) ** 2,
+        items, key=lambda s: -(s[0]-px)**2 - (s[1]-py)**2
     ):
-        rel_x = sx - px
-        rel_y = sy - py
+        rx = sx - px
+        ry = sy - py
 
-        # Transform to camera space
-        # tx: left/right screen offset   tz: depth (must be > 0)
-        tx = inv_det * ( dir_y * rel_x - dir_x * rel_y)
-        tz = inv_det * (-pl_y  * rel_x + pl_x  * rel_y)
+        tx = inv_det * ( dir_y * rx - dir_x * ry)
+        tz = inv_det * (-pl_y  * rx + pl_x  * ry)
 
         if tz <= 0.05:
-            continue    # behind player
+            continue
 
-        # Horizontal screen centre
-        scr_cx = int((W / 2.0) * (1.0 + tx / tz))
-
-        # Sprite world-height ≈ 0.45 units → projected screen height
-        sprite_h = max(1, int(H * 0.45 / tz))
+        scr_cx   = int((W / 2.0) * (1.0 + tx / tz))
+        world_h  = _ITEM_WORLD_H.get(stype, 0.45)
+        sprite_h = max(1, int(H * world_h / tz))
         sprite_w = sprite_h
 
-        # Anchor bottom of sprite to the floor horizon at depth tz
-        floor_y  = H // 2 + int(H / (2.0 * tz))
-
+        floor_y   = H // 2 + int(H / (2.0 * tz))
         row_end   = min(H - 1, floor_y)
         row_start = max(0, floor_y - sprite_h)
         col_start = max(0, scr_cx - sprite_w // 2)
         col_end   = min(W - 1, scr_cx + sprite_w // 2)
 
-        tex = _KEY_TEXTURES[stype]
+        tex      = _ITEM_TEXTURES[stype]
+        fog_dist = _fog(tz) * 0.75
 
         for col in range(col_start, col_end + 1):
             if tz >= zbuf[col]:
-                continue    # wall is closer in this column
+                continue
 
             tex_x = int((col - (scr_cx - sprite_w // 2)) * ts / max(1, sprite_w))
             tex_x = max(0, min(ts - 1, tex_x))
@@ -542,10 +686,9 @@ def _render_sprites(
 
                 colour = tex[tex_y][tex_x]
                 if colour is None:
-                    continue    # transparent
+                    continue
 
-                fog_t = _fog(tz) * 0.8
-                pixels[col, row] = _lerp(colour, _C_FOG, fog_t)
+                pixels[col, row] = _lerp(colour, _C_FOG, fog_dist)
 
 
 # ── Main renderer ─────────────────────────────────────────────────────────────
@@ -557,10 +700,10 @@ def render(
     angle: float,
 ) -> Image.Image:
     """
-    Full-frame raytrace.  Returns a SCREEN_W × SCREEN_H PIL Image (RGB).
+    Raytrace a full frame and return a PIL RGB Image.
 
-    Pass 1 – Column DDA: ceiling / wall (or door) / floor, per pixel.
-    Pass 2 – Sprite projection: key pickups, floor-anchored, z-buffered.
+    Pass 1 – column DDA → ceiling / wall (or door) / floor per pixel.
+    Pass 2 – sprite projection → keycards & documents, floor-anchored.
     """
     W, H     = SCREEN_W, SCREEN_H
     half_fov = FOV / 2.0
@@ -575,37 +718,59 @@ def render(
 
         zbuf[col] = perp
 
-        wall_h   = int(H / perp)
-        wall_top = max(0, H // 2 - wall_h // 2)
-        wall_bot = min(H - 1, H // 2 + wall_h // 2)
+        wall_h    = int(H / perp)
+        wall_top  = max(0, H // 2 - wall_h // 2)
+        wall_bot  = min(H - 1, H // 2 + wall_h // 2)
         wall_span = max(1, wall_bot - wall_top)
 
-        is_door = ct in _DOORS
-
-        # Pre-compute fog factor (same for all rows in this column)
-        fog_t = _fog(perp)
+        is_door = ct in _DOORS   # _DOOR_H is excluded – rendered as wall
 
         for row in range(H):
             if row < wall_top:
-                # ── Ceiling ────────────────────────────────────────────
-                # Quadratic gradient: near-black at top, dim brown near horizon
-                t = (row / wall_top) ** 2 if wall_top > 0 else 0.0
-                pix[col, row] = _lerp(_C_CEIL_TOP, _C_CEIL_HOR, t)
+                # ── Drop ceiling ──────────────────────────────────────────
+                # Perspective t: 0 at top of screen, 1 at horizon
+                t = (row / wall_top) if wall_top > 0 else 1.0
+
+                # Approximate ceiling tile grid using screen-space coords.
+                # Tiles appear denser near the horizon (foreshortening).
+                scale    = max(1.0, wall_top / 12.0)
+                g_col    = int(col / scale) % 34
+                g_row    = int(row / scale) % 28
+                is_grid  = g_col < 2 or g_row < 2
+
+                # Fluorescent light bays (every ~80 px column band)
+                bay_lit  = (col // 80) % 3 != 2
+
+                if is_grid:
+                    base = _C_CEIL_GRID
+                elif bay_lit and g_col > 8 and g_col < 24:
+                    base = _C_CEIL_LIGHT
+                else:
+                    base = _C_CEIL_TILE
+
+                pix[col, row] = _lerp(base, _C_CEIL_HOR, t ** 0.6)
 
             elif row <= wall_bot:
-                # ── Wall or door ────────────────────────────────────────
-                wy = (row - wall_top) / wall_span  # vertical tex coord [0,1]
+                # ── Wall or door ──────────────────────────────────────────
+                wy = (row - wall_top) / wall_span
                 if is_door:
                     pix[col, row] = _door_pixel(ct, side, perp, wx, wy)
                 else:
                     pix[col, row] = _wall_pixel(side, perp, wx, wy)
 
             else:
-                # ── Floor ───────────────────────────────────────────────
-                # Square-root gradient: darker at horizon, brighter near player
+                # ── Carpet floor ──────────────────────────────────────────
                 span = H - 1 - wall_bot
-                t    = ((row - wall_bot) / span) ** 0.5 if span > 0 else 1.0
-                pix[col, row] = _lerp(_C_FLOOR_HOR, _C_FLOOR_BOT, t)
+                t    = ((row - wall_bot) / span) ** 0.55 if span > 0 else 1.0
+
+                # Diagonal weave pattern (subtle ±4 % brightness shift)
+                weave = ((col + row) // 3) % 2
+                shade = 1.04 if weave else 0.96
+
+                base  = _lerp(_C_FLOOR_HOR, _C_FLOOR_BOT, t)
+                pix[col, row] = _clamp(
+                    base[0] * shade, base[1] * shade, base[2] * shade
+                )
 
     _render_sprites(pix, zbuf, items, px, py, angle, W, H)
     return img

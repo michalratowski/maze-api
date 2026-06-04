@@ -3,7 +3,7 @@ main.py – FastAPI service: Doom-style 3-D maze raycaster.
 
 Endpoints
 ---------
-POST /render   → 500×500 JPEG image
+POST /render   → JSON { "image": "<base64-encoded JPEG>" }
 GET  /health   → {"status": "ok"}
 GET  /docs     → Swagger UI
 GET  /redoc    → ReDoc UI
@@ -25,16 +25,17 @@ Example curl
        -d '{
          "grid":   "W,W,W,BD,W,W,W;W,P,W,E,E,E,W;W,E,W,E,E,BK,W;W,E,RD,W,W,E,W;W,E,W,E,E,RK,W;W,E,W,YD,W,E,W;W,E,E,E,E,YK,W;W,W,W,W,W,W,W",
          "facing": "right"
-       }' \\
-       --output maze.jpg
+       }'
+  # Response: { "image": "<base64 string>", "format": "jpeg", "encoding": "base64" }
 """
 
+import base64
 import io
 import logging
 import time
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from raycast import parse_grid, facing_to_angle, render, FACING_ANGLES
@@ -144,11 +145,16 @@ def health():
     "/render",
     tags=["maze"],
     summary="Render a Doom-style first-person maze view",
-    response_class=StreamingResponse,
+    response_class=JSONResponse,
     responses={
         200: {
-            "content": {"image/jpeg": {}},
-            "description": "500 × 500 JPEG — Doom-style first-person maze view.",
+            "content": {"application/json": {}},
+            "description": (
+                "JSON object with a base64-encoded JPEG of the maze view.\n\n"
+                "```json\n"
+                '{ "image": "<base64>", "format": "jpeg", "encoding": "base64" }\n'
+                "```"
+            ),
         },
         400: {"description": "Malformed grid string or invalid facing direction."},
         500: {"description": "Unexpected rendering error."},
@@ -212,13 +218,13 @@ def render_maze(req: RenderRequest):
         log.exception("Render failed")
         raise HTTPException(status_code=500, detail="Rendering failed.") from exc
 
-    # ── Encode & stream ───────────────────────────────────────────────────────
+    # ── Encode to JPEG → base64 → JSON ───────────────────────────────────────
     buf = io.BytesIO()
     image.save(buf, format="JPEG", quality=93, optimize=True, subsampling=0)
-    buf.seek(0)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
-    return StreamingResponse(
-        buf,
-        media_type="image/jpeg",
-        headers={"Content-Disposition": 'inline; filename="maze.jpg"'},
-    )
+    return JSONResponse(content={
+        "image":    b64,
+        "format":   "jpeg",
+        "encoding": "base64",
+    })

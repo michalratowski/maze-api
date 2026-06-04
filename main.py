@@ -15,6 +15,9 @@ Rows separated by ';', cells by ','.
   W         – wall  (beige drywall with chair rail)
   BD/RD/YD  – blue / red / yellow security door
   HD        – hidden door (looks identical to a plain wall)
+  C         – office chair  (solid, blocks view)
+  DC        – desk with computer  (solid, blocks view)
+  DE        – empty desk  (solid, blocks view)
   E         – empty passable floor
   P         – player start (exactly one required)
   BK/RK/YK  – blue / red / yellow RFID keycard
@@ -92,6 +95,9 @@ class RenderRequest(BaseModel):
             "| `RD`   | Red security door |\n"
             "| `YD`   | Yellow security door |\n"
             "| `HD`   | Hidden door (visually identical to `W`) |\n"
+            "| `C`    | Office chair (solid – blocks view) |\n"
+            "| `DC`   | Desk with computer (solid – blocks view) |\n"
+            "| `DE`   | Empty desk (solid – blocks view) |\n"
             "| `E`    | Empty floor |\n"
             "| `P`    | Player start |\n"
             "| `BK`   | Blue RFID keycard |\n"

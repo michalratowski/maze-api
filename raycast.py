@@ -39,14 +39,19 @@ _DOOR_B = 2
 _DOOR_R = 3
 _DOOR_Y = 4
 _DOOR_H = 5    # hidden door – solid like a wall, rendered like a wall
+_CHAIR  = 6    # office chair  (solid, custom render)
+_DESK_C = 7    # desk + computer (solid, custom render)
+_DESK_E = 8    # empty desk     (solid, custom render)
 
 _ITEM_B   = 10   # blue  keycard
 _ITEM_R   = 11   # red   keycard
 _ITEM_Y   = 12   # yellow keycard
 _ITEM_DOC = 13   # document
 
-_DOORS  = frozenset({_DOOR_B, _DOOR_R, _DOOR_Y})
-_WALLS  = frozenset({_WALL, _DOOR_H})   # cell types that hit at the cell boundary
+_DOORS     = frozenset({_DOOR_B, _DOOR_R, _DOOR_Y})
+_FURNITURE = frozenset({_CHAIR, _DESK_C, _DESK_E})
+# All solid cell types that use cell-boundary DDA hit (not mid-plane):
+_WALLS     = frozenset({_WALL, _DOOR_H}) | _FURNITURE
 
 # ── Sprite world-height (controls billboard size on screen) ───────────────────
 
@@ -110,6 +115,24 @@ _KEY_ACCENT: dict[int, tuple] = {
     _ITEM_R: (225,  30,  30),
     _ITEM_Y: (225, 200,  30),
 }
+
+# Furniture
+_C_CHAIR_FABRIC  = ( 42,  54,  72)   # dark navy blue upholstery
+_C_CHAIR_FABRIC2 = ( 54,  66,  86)   # seat cushion (slightly lighter)
+_C_CHAIR_METAL   = (118, 120, 124)   # chrome column & armrests
+_C_CHAIR_BASE    = ( 24,  24,  26)   # black plastic 5-star base / casters
+
+_C_DESK_SURFACE  = (234, 231, 224)   # white-laminate desktop surface
+_C_DESK_EDGE     = (198, 194, 186)   # desktop overhang edge (shadow lip)
+_C_DESK_FASCIA   = (220, 218, 213)   # front panel face (lit)
+_C_DESK_FASCIA_D = (188, 185, 180)   # front panel face (shadow / NS side)
+_C_DESK_SEAM     = (172, 169, 164)   # horizontal panel-join seams
+
+_C_MON_BEZEL     = ( 26,  26,  30)   # monitor outer plastic frame
+_C_MON_SCREEN    = ( 10,  16,  32)   # screen (off / dark)
+_C_MON_GLOW      = ( 42, 118, 210)   # screen blue content glow
+_C_MON_STAND     = ( 52,  52,  56)   # monitor stand / neck
+_C_KEYBOARD      = (196, 194, 188)   # keyboard deck (light grey)
 
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
@@ -474,12 +497,206 @@ _ITEM_TEXTURES: dict[int, list[list[tuple | None]]] = {
 }
 
 
+# ── Chair pixel ──────────────────────────────────────────────────────────────
+
+def _chair_pixel(side: int, perp: float, wx: float, wy: float) -> tuple:
+    """
+    Office task-chair rendered as a solid cell, viewed head-on.
+
+    Vertical anatomy (wy = 0 top … 1 bottom, maps to full cell height ≈ 1 m):
+      0.00–0.54  backrest  (dark navy fabric, button-grid dimples, rounded crown)
+      0.54–0.62  gap       (open air + metal armrests on sides)
+      0.62–0.76  seat      (same fabric, slightly lighter)
+      0.76–0.87  pneumatic column  (chrome cylinder)
+      0.87–1.00  5-star base / casters  (black plastic spokes)
+
+    The chair occupies the centre 72 % of the cell width; sides show the
+    wall behind it so the chair does not look like a solid block.
+    """
+    fog_t = _fog(perp)
+
+    def _wall_bg():
+        base = _C_WALL_UP_EW if wy < _RAIL_Y else _C_WALL_LO_EW
+        if side == 1:
+            base = _C_WALL_UP_NS if wy < _RAIL_Y else _C_WALL_LO_NS
+        return _lerp(base, _C_FOG, fog_t)
+
+    # Horizontal extent of chair parts
+    BACK_L, BACK_R = 0.14, 0.86   # backrest left / right edge
+    SEAT_L, SEAT_R = 0.10, 0.90   # seat is a bit wider
+    COL_L,  COL_R  = 0.44, 0.56   # pneumatic column (narrow)
+    ARM_L,  ARM_R  = 0.14, 0.26   # left armrest band
+    ARM_L2, ARM_R2 = 0.74, 0.86   # right armrest band
+
+    # ── Backrest ──────────────────────────────────────────────────────────
+    if wy < 0.54:
+        if not (BACK_L < wx < BACK_R):
+            return _wall_bg()
+
+        # Rounded crown: clip corners at very top
+        if wy < 0.07:
+            crown_w = 0.72 * (1.0 - (0.07 - wy) * 8.0)
+            ctr     = 0.50
+            if abs(wx - ctr) > crown_w / 2:
+                return _wall_bg()
+
+        # Button-grid dimple pattern
+        bx  = int(wx * 8) % 2
+        by  = int(wy * 11) % 2
+        dim = (bx == 0 and by == 0)
+        col = tuple(max(0, c - 14) for c in _C_CHAIR_FABRIC) if dim else _C_CHAIR_FABRIC
+        return _lerp(col, _C_FOG, fog_t)
+
+    # ── Gap (armrest zone) ────────────────────────────────────────────────
+    if wy < 0.62:
+        if (ARM_L < wx < ARM_R) or (ARM_L2 < wx < ARM_R2):
+            return _lerp(_C_CHAIR_METAL, _C_FOG, fog_t)
+        return _wall_bg()
+
+    # ── Seat cushion ──────────────────────────────────────────────────────
+    if wy < 0.76:
+        if not (SEAT_L < wx < SEAT_R):
+            return _wall_bg()
+        bx  = int(wx * 5) % 2
+        by  = int((wy - 0.62) * 18) % 2
+        dim = (bx == 0 and by == 0)
+        col = tuple(max(0, c - 10) for c in _C_CHAIR_FABRIC2) if dim else _C_CHAIR_FABRIC2
+        return _lerp(col, _C_FOG, fog_t)
+
+    # ── Pneumatic column ──────────────────────────────────────────────────
+    if wy < 0.87:
+        if not (COL_L < wx < COL_R):
+            return _wall_bg()
+        # Subtle chrome highlight on the left edge of the cylinder
+        hl = max(0.0, 1.0 - (wx - COL_L) / (COL_R - COL_L) * 2.5)
+        shade = 1.0 + hl * 0.30
+        return _lerp(_clamp(_C_CHAIR_METAL[0]*shade,
+                             _C_CHAIR_METAL[1]*shade,
+                             _C_CHAIR_METAL[2]*shade), _C_FOG, fog_t)
+
+    # ── 5-star base / casters ─────────────────────────────────────────────
+    # Five spokes radiating from centre at 72° intervals
+    cx, cy  = 0.50, 1.02          # hub centre (slightly below strip bottom)
+    dx, dy  = wx - cx, wy - cy
+    angle   = math.atan2(dx, -dy) % (2 * math.pi)
+    spoke_a = angle % (2 * math.pi / 5)   # angle within one spoke sector
+    dist    = math.hypot(dx * 1.8, dy)    # elliptical (wider than tall)
+    on_spoke = spoke_a < 0.22 and dist < 0.44
+    if on_spoke:
+        return _lerp(_C_CHAIR_BASE, _C_FOG, fog_t)
+    return _wall_bg()
+
+
+# ── Desk pixel ────────────────────────────────────────────────────────────────
+
+# Vertical split points (wy, 0 = top of strip, 1 = bottom)
+_DESK_SURF_Y  = 0.46   # top surface of the desk
+_DESK_EDGE_Y  = 0.50   # underside of overhanging edge
+_DESK_SEAM_Y1 = 0.66   # first horizontal panel seam on fascia
+_DESK_SEAM_Y2 = 0.84   # second horizontal panel seam
+
+# Monitor geometry (only for _DESK_C)
+_MON_L, _MON_R = 0.16, 0.74    # monitor left / right (wx)
+_MON_T, _MON_B = 0.04, 0.40    # monitor top / bottom (wy)
+_BEZEL          = 0.022         # bezel thickness fraction
+_STAND_L        = 0.42
+_STAND_R        = 0.54
+
+def _desk_pixel(desk_type: int, side: int, perp: float, wx: float, wy: float) -> tuple:
+    """
+    Office desk viewed from the front as a solid cell.
+
+    Vertical anatomy
+    ────────────────
+    DC (desk + computer):
+      Monitor region (wy 0.04–0.40):
+        Thin dark bezel → screen content (blue-gradient spreadsheet glow)
+      Monitor stand (wy 0.40–0.46, centre strip)
+      Keyboard strip  (wy 0.40–0.46, left of stand)
+      Desktop surface (wy 0.46–0.50) – white laminate
+      Desk fascia     (wy 0.50–1.00) – panel with two horizontal seams
+
+    DE (empty desk):
+      Wall above desk (wy 0.00–0.46) – shows drywall + chair rail
+      Desktop surface (wy 0.46–0.50)
+      Desk fascia     (wy 0.50–1.00)
+    """
+    fog_t = _fog(perp)
+
+    # ── Above desk surface ────────────────────────────────────────────────
+    if wy < _DESK_SURF_Y:
+        if desk_type == _DESK_C:
+            # Monitor bezel
+            in_mon = _MON_L < wx < _MON_R and _MON_T < wy < _MON_B
+            if in_mon:
+                on_bezel = (wx < _MON_L + _BEZEL or wx > _MON_R - _BEZEL or
+                            wy < _MON_T + _BEZEL or wy > _MON_B - _BEZEL)
+                if on_bezel:
+                    return _lerp(_C_MON_BEZEL, _C_FOG, fog_t)
+                # Screen content – blue spreadsheet gradient
+                sfx = (wx - _MON_L - _BEZEL) / (_MON_R - _MON_L - 2*_BEZEL)
+                sfy = (wy - _MON_T - _BEZEL) / (_MON_B - _MON_T - 2*_BEZEL)
+                # Faint horizontal scan-line bands
+                scanline = 0.92 if int(sfy * 28) % 2 == 0 else 1.0
+                # Column-rule grid lines (spreadsheet)
+                col_rule = int(sfx * 7) % 7 == 0
+                row_rule = int(sfy * 12) % 12 == 0
+                if col_rule or row_rule:
+                    screen = _lerp(_C_MON_GLOW, (220, 235, 255), 0.55)
+                else:
+                    screen = _lerp(_C_MON_SCREEN, _C_MON_GLOW, sfy * 0.55 * scanline)
+                return _lerp(screen, _C_FOG, fog_t)
+
+            # Monitor stand (centre) and keyboard (left of stand)
+            if _MON_T < wy < _DESK_SURF_Y:
+                if _STAND_L < wx < _STAND_R and wy > _MON_B:
+                    return _lerp(_C_MON_STAND, _C_FOG, fog_t)
+                if wx < _STAND_L and wy > _MON_B + 0.01:
+                    # Keyboard – faint key grid
+                    kfx = (wx - _MON_L) / (_STAND_L - _MON_L)
+                    kfy = (wy - _MON_B - 0.01) / (_DESK_SURF_Y - _MON_B - 0.01)
+                    key = (int(kfx * 12) % 3 == 0 or int(kfy * 4) % 2 == 0)
+                    base = tuple(max(0, c - 14) for c in _C_KEYBOARD) if key else _C_KEYBOARD
+                    return _lerp(base, _C_FOG, fog_t)
+
+        # Anything above desk not covered by monitor/keyboard → show wall
+        wall_wy = wy / _DESK_SURF_Y   # rescale so wall shader fills this band
+        return _wall_pixel(side, perp, wx, wall_wy)
+
+    # ── Desktop surface ───────────────────────────────────────────────────
+    if wy < _DESK_EDGE_Y:
+        if wy < _DESK_SURF_Y + 0.008:
+            return _lerp(_C_DESK_EDGE, _C_FOG, fog_t)       # edge lip shadow
+        return _lerp(_C_DESK_SURFACE, _C_FOG, fog_t)
+
+    # ── Desk fascia (front panel) ─────────────────────────────────────────
+    fascia = _C_DESK_FASCIA if side == 0 else _C_DESK_FASCIA_D
+
+    # Cable-management grommet on right side
+    if 0.78 < wx < 0.90 and 0.52 < wy < 0.62:
+        if math.hypot((wx - 0.84) * 6, (wy - 0.57) * 10) < 1.0:
+            return _lerp(_C_DESK_SEAM, _C_FOG, fog_t)
+
+    # Horizontal panel seams
+    if abs(wy - _DESK_SEAM_Y1) < 0.012 or abs(wy - _DESK_SEAM_Y2) < 0.012:
+        return _lerp(_C_DESK_SEAM, _C_FOG, fog_t)
+
+    # Subtle vertical panel-edge shadow on far left/right
+    if wx < 0.04 or wx > 0.96:
+        return _lerp(_C_DESK_SEAM, _C_FOG, fog_t)
+
+    return _lerp(fascia, _C_FOG, fog_t)
+
+
 # ── Grid parser ───────────────────────────────────────────────────────────────
 
 _SOLID_TOKENS: dict[str, int] = {
     "W":  _WALL,
     "BD": _DOOR_B, "RD": _DOOR_R, "YD": _DOOR_Y,
     "HD": _DOOR_H,   # hidden door – looks like a wall
+    "C":  _CHAIR,    # office chair
+    "DC": _DESK_C,   # desk with computer
+    "DE": _DESK_E,   # empty desk
     "D":  _DOOR_B,   # legacy
 }
 _ITEM_TOKENS: dict[str, int] = {
@@ -723,7 +940,8 @@ def render(
         wall_bot  = min(H - 1, H // 2 + wall_h // 2)
         wall_span = max(1, wall_bot - wall_top)
 
-        is_door = ct in _DOORS   # _DOOR_H is excluded – rendered as wall
+        is_door      = ct in _DOORS      # _DOOR_H excluded – rendered as wall
+        is_furniture = ct in _FURNITURE   # chair / desk_c / desk_e
 
         for row in range(H):
             if row < wall_top:
@@ -751,10 +969,15 @@ def render(
                 pix[col, row] = _lerp(base, _C_CEIL_HOR, t ** 0.6)
 
             elif row <= wall_bot:
-                # ── Wall or door ──────────────────────────────────────────
+                # ── Wall, door, or furniture ──────────────────────────────
                 wy = (row - wall_top) / wall_span
                 if is_door:
                     pix[col, row] = _door_pixel(ct, side, perp, wx, wy)
+                elif is_furniture:
+                    if ct == _CHAIR:
+                        pix[col, row] = _chair_pixel(side, perp, wx, wy)
+                    else:
+                        pix[col, row] = _desk_pixel(ct, side, perp, wx, wy)
                 else:
                     pix[col, row] = _wall_pixel(side, perp, wx, wy)
 

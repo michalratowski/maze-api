@@ -39,9 +39,10 @@ _DOOR_B = 2
 _DOOR_R = 3
 _DOOR_Y = 4
 _DOOR_H = 5    # hidden door – solid like a wall, rendered like a wall
-_CHAIR  = 6    # office chair  (solid, custom render)
+_CHAIR  = 6    # office chair   (solid, custom render – half-height)
 _DESK_C = 7    # desk + computer (solid, custom render)
 _DESK_E = 8    # empty desk     (solid, custom render)
+_WALL_W = 9    # wall with window (solid, custom render)
 
 _ITEM_B   = 10   # blue  keycard
 _ITEM_R   = 11   # red   keycard
@@ -51,7 +52,7 @@ _ITEM_DOC = 13   # document
 _DOORS     = frozenset({_DOOR_B, _DOOR_R, _DOOR_Y})
 _FURNITURE = frozenset({_CHAIR, _DESK_C, _DESK_E})
 # All solid cell types that use cell-boundary DDA hit (not mid-plane):
-_WALLS     = frozenset({_WALL, _DOOR_H}) | _FURNITURE
+_WALLS     = frozenset({_WALL, _DOOR_H, _WALL_W}) | _FURNITURE
 
 # ── Sprite world-height (controls billboard size on screen) ───────────────────
 
@@ -501,88 +502,89 @@ _ITEM_TEXTURES: dict[int, list[list[tuple | None]]] = {
 
 def _chair_pixel(side: int, perp: float, wx: float, wy: float) -> tuple:
     """
-    Office task-chair rendered as a solid cell, viewed head-on.
+    Office task-chair – occupies the **bottom half** of the cell strip only.
 
-    Vertical anatomy (wy = 0 top … 1 bottom, maps to full cell height ≈ 1 m):
-      0.00–0.54  backrest  (dark navy fabric, button-grid dimples, rounded crown)
-      0.54–0.62  gap       (open air + metal armrests on sides)
-      0.62–0.76  seat      (same fabric, slightly lighter)
-      0.76–0.87  pneumatic column  (chrome cylinder)
-      0.87–1.00  5-star base / casters  (black plastic spokes)
+    wy < 0.5  → wall is visible above the chair (delegate to _wall_pixel).
+    wy ≥ 0.5  → chair anatomy, remapped so cwy = (wy−0.5)×2 ∈ [0, 1]:
 
-    The chair occupies the centre 72 % of the cell width; sides show the
-    wall behind it so the chair does not look like a solid block.
+      cwy 0.00–0.54  backrest  (dark navy fabric, button-grid dimples, crown)
+      cwy 0.54–0.62  gap       (open air + metal armrests on sides)
+      cwy 0.62–0.76  seat cushion  (slightly lighter fabric)
+      cwy 0.76–0.87  pneumatic column  (chrome cylinder)
+      cwy 0.87–1.00  5-star base / casters  (black plastic spokes)
+
+    The chair occupies the centre 72 % of the cell width; transparent areas
+    delegate to _wall_pixel so the correct wall texture shows through.
     """
+    # ── Upper half: wall above the chair ─────────────────────────────────
+    if wy < 0.5:
+        return _wall_pixel(side, perp, wx, wy)
+
     fog_t = _fog(perp)
 
-    def _wall_bg():
-        base = _C_WALL_UP_EW if wy < _RAIL_Y else _C_WALL_LO_EW
-        if side == 1:
-            base = _C_WALL_UP_NS if wy < _RAIL_Y else _C_WALL_LO_NS
-        return _lerp(base, _C_FOG, fog_t)
+    # Remap lower half → [0, 1] for chair anatomy
+    cwy = (wy - 0.5) * 2.0
 
-    # Horizontal extent of chair parts
-    BACK_L, BACK_R = 0.14, 0.86   # backrest left / right edge
-    SEAT_L, SEAT_R = 0.10, 0.90   # seat is a bit wider
-    COL_L,  COL_R  = 0.44, 0.56   # pneumatic column (narrow)
-    ARM_L,  ARM_R  = 0.14, 0.26   # left armrest band
-    ARM_L2, ARM_R2 = 0.74, 0.86   # right armrest band
+    def _wall_bg():
+        """Show wall texture at the original wy for transparent chair areas."""
+        return _wall_pixel(side, perp, wx, wy)
+
+    # Horizontal extents
+    BACK_L, BACK_R = 0.14, 0.86
+    SEAT_L, SEAT_R = 0.10, 0.90
+    COL_L,  COL_R  = 0.44, 0.56
+    ARM_L,  ARM_R  = 0.14, 0.26
+    ARM_L2, ARM_R2 = 0.74, 0.86
 
     # ── Backrest ──────────────────────────────────────────────────────────
-    if wy < 0.54:
+    if cwy < 0.54:
         if not (BACK_L < wx < BACK_R):
             return _wall_bg()
-
-        # Rounded crown: clip corners at very top
-        if wy < 0.07:
-            crown_w = 0.72 * (1.0 - (0.07 - wy) * 8.0)
-            ctr     = 0.50
-            if abs(wx - ctr) > crown_w / 2:
+        # Rounded crown
+        if cwy < 0.07:
+            crown_w = 0.72 * (1.0 - (0.07 - cwy) * 8.0)
+            if abs(wx - 0.50) > crown_w / 2:
                 return _wall_bg()
-
         # Button-grid dimple pattern
         bx  = int(wx * 8) % 2
-        by  = int(wy * 11) % 2
+        by  = int(cwy * 11) % 2
         dim = (bx == 0 and by == 0)
         col = tuple(max(0, c - 14) for c in _C_CHAIR_FABRIC) if dim else _C_CHAIR_FABRIC
         return _lerp(col, _C_FOG, fog_t)
 
-    # ── Gap (armrest zone) ────────────────────────────────────────────────
-    if wy < 0.62:
+    # ── Gap / armrest zone ────────────────────────────────────────────────
+    if cwy < 0.62:
         if (ARM_L < wx < ARM_R) or (ARM_L2 < wx < ARM_R2):
             return _lerp(_C_CHAIR_METAL, _C_FOG, fog_t)
         return _wall_bg()
 
     # ── Seat cushion ──────────────────────────────────────────────────────
-    if wy < 0.76:
+    if cwy < 0.76:
         if not (SEAT_L < wx < SEAT_R):
             return _wall_bg()
         bx  = int(wx * 5) % 2
-        by  = int((wy - 0.62) * 18) % 2
+        by  = int((cwy - 0.62) * 18) % 2
         dim = (bx == 0 and by == 0)
         col = tuple(max(0, c - 10) for c in _C_CHAIR_FABRIC2) if dim else _C_CHAIR_FABRIC2
         return _lerp(col, _C_FOG, fog_t)
 
     # ── Pneumatic column ──────────────────────────────────────────────────
-    if wy < 0.87:
+    if cwy < 0.87:
         if not (COL_L < wx < COL_R):
             return _wall_bg()
-        # Subtle chrome highlight on the left edge of the cylinder
-        hl = max(0.0, 1.0 - (wx - COL_L) / (COL_R - COL_L) * 2.5)
+        hl    = max(0.0, 1.0 - (wx - COL_L) / (COL_R - COL_L) * 2.5)
         shade = 1.0 + hl * 0.30
         return _lerp(_clamp(_C_CHAIR_METAL[0]*shade,
                              _C_CHAIR_METAL[1]*shade,
                              _C_CHAIR_METAL[2]*shade), _C_FOG, fog_t)
 
     # ── 5-star base / casters ─────────────────────────────────────────────
-    # Five spokes radiating from centre at 72° intervals
-    cx, cy  = 0.50, 1.02          # hub centre (slightly below strip bottom)
-    dx, dy  = wx - cx, wy - cy
-    angle   = math.atan2(dx, -dy) % (2 * math.pi)
-    spoke_a = angle % (2 * math.pi / 5)   # angle within one spoke sector
-    dist    = math.hypot(dx * 1.8, dy)    # elliptical (wider than tall)
-    on_spoke = spoke_a < 0.22 and dist < 0.44
-    if on_spoke:
+    cx, cy   = 0.50, 1.02
+    dx, dy   = wx - cx, cwy - cy
+    angle    = math.atan2(dx, -dy) % (2 * math.pi)
+    spoke_a  = angle % (2 * math.pi / 5)
+    dist     = math.hypot(dx * 1.8, dy)
+    if spoke_a < 0.22 and dist < 0.44:
         return _lerp(_C_CHAIR_BASE, _C_FOG, fog_t)
     return _wall_bg()
 
@@ -688,6 +690,90 @@ def _desk_pixel(desk_type: int, side: int, perp: float, wx: float, wy: float) ->
     return _lerp(fascia, _C_FOG, fog_t)
 
 
+# ── Window-wall colours ──────────────────────────────────────────────────────
+
+_C_WIN_FRAME  = (238, 236, 230)   # white-painted PVC / aluminium frame
+_C_WIN_SILL   = (226, 223, 216)   # window sill (slightly darker, protruding)
+_C_WIN_BLIND  = (198, 200, 196)   # venetian blind slat (pearl white)
+_C_SKY_TOP    = (178, 208, 232)   # overcast sky near top of pane
+_C_SKY_BOT    = (148, 178, 208)   # overcast sky near bottom (deeper blue-grey)
+_C_OUTSIDE    = (120, 148, 168)   # distant ground / horizon below sky
+
+# Window geometry constants (wx / wy fractions of the wall strip)
+_WIN_L    = 0.12   # left edge of window
+_WIN_R    = 0.88   # right edge
+_WIN_T    = 0.18   # top edge
+_WIN_B    = 0.62   # bottom edge
+_WIN_FW   = 0.022  # frame thickness
+_WIN_SILL_H = 0.04 # sill height below window
+_WIN_MID_X  = 0.50 # centre vertical muntin
+_WIN_MID_Y  = (_WIN_T + _WIN_B) / 2   # centre horizontal muntin
+
+
+def _wall_window_pixel(side: int, perp: float, wx: float, wy: float) -> tuple:
+    """
+    Wall with a double-pane office window (venetian blinds half-open).
+
+    Layout
+    ──────
+    Normal drywall outside the window opening.
+
+    Window opening  (wx 0.12–0.88, wy 0.18–0.62):
+      White PVC frame (outer border + centre cross muntin)
+      Glass panes – overcast sky gradient split by horizontal venetian blinds
+        odd  slots  → blind slat  (pearl-white, slightly angled shade)
+        even slots  → gap between slats → sky colour visible
+
+    Window sill     (wx 0.10–0.90, wy 0.62–0.66): slightly protruding ledge
+    """
+    fog_t = _fog(perp)
+
+    sill_t = _WIN_B
+    sill_b = _WIN_B + _WIN_SILL_H
+
+    in_opening = _WIN_L < wx < _WIN_R and _WIN_T < wy < _WIN_B
+    on_sill    = _WIN_L - 0.02 < wx < _WIN_R + 0.02 and sill_t <= wy < sill_b
+
+    # ── Window sill ───────────────────────────────────────────────────────
+    if on_sill:
+        return _lerp(_C_WIN_SILL, _C_FOG, fog_t)
+
+    # ── Frame and muntins ─────────────────────────────────────────────────
+    if in_opening:
+        on_frame  = (wx < _WIN_L + _WIN_FW or wx > _WIN_R - _WIN_FW or
+                     wy < _WIN_T + _WIN_FW or wy > _WIN_B - _WIN_FW)
+        on_muntin = (abs(wx - _WIN_MID_X) < _WIN_FW * 0.8 or
+                     abs(wy - _WIN_MID_Y) < _WIN_FW * 0.8)
+        if on_frame or on_muntin:
+            return _lerp(_C_WIN_FRAME, _C_FOG, fog_t)
+
+        # ── Glass / venetian blinds ───────────────────────────────────────
+        # Fractional position within the glass area
+        glass_t = (wy - _WIN_T - _WIN_FW) / (_WIN_B - _WIN_T - 2 * _WIN_FW)
+
+        # Sky gradient (top pane brighter; split at mid muntin)
+        sky_col = _lerp(_C_SKY_TOP, _C_SKY_BOT, glass_t)
+
+        # 12 blind slots across the full pane height
+        slot     = (glass_t * 12) % 1.0
+        on_slat  = slot < 0.42                 # 42 % of each slot is slat
+
+        if on_slat:
+            # Slat with a subtle tilt-shade: top edge lighter, bottom darker
+            tilt = slot / 0.42                 # 0 = top of slat, 1 = bottom
+            shade = _lerp(_C_WIN_FRAME, _C_WIN_BLIND, tilt * 0.5)
+            # Fog applies less strongly to the bright window area
+            return _lerp(shade, _C_FOG, fog_t * 0.45)
+        else:
+            # Gap between slats – see the sky (or ground near bottom)
+            if glass_t > 0.82:
+                sky_col = _lerp(_C_SKY_BOT, _C_OUTSIDE, (glass_t - 0.82) / 0.18)
+            return _lerp(sky_col, _C_FOG, fog_t * 0.30)   # windows stay bright
+
+    # ── Drywall outside the opening ───────────────────────────────────────
+    return _wall_pixel(side, perp, wx, wy)
+
+
 # ── Grid parser ───────────────────────────────────────────────────────────────
 
 _SOLID_TOKENS: dict[str, int] = {
@@ -697,6 +783,7 @@ _SOLID_TOKENS: dict[str, int] = {
     "C":  _CHAIR,    # office chair
     "DC": _DESK_C,   # desk with computer
     "DE": _DESK_E,   # empty desk
+    "WW": _WALL_W,   # wall with window
     "D":  _DOOR_B,   # legacy
 }
 _ITEM_TOKENS: dict[str, int] = {
@@ -978,6 +1065,8 @@ def render(
                         pix[col, row] = _chair_pixel(side, perp, wx, wy)
                     else:
                         pix[col, row] = _desk_pixel(ct, side, perp, wx, wy)
+                elif ct == _WALL_W:
+                    pix[col, row] = _wall_window_pixel(side, perp, wx, wy)
                 else:
                     pix[col, row] = _wall_pixel(side, perp, wx, wy)
 
